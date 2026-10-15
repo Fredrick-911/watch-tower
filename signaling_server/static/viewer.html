@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watchtower Live View</title>
+<style>
+  :root { --bg:#0f1214; --panel:#191e22; --text:#e8ecef; --muted:#93a0aa; --ok:#3fb27f; --warn:#e0a33a; --bad:#e05a4f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { padding:12px 16px; background:var(--panel); display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; }
+  header h1 { font-size:17px; margin:0; }
+  .pill { padding:3px 10px; border-radius:999px; font-size:13px; background:#2a3238; }
+  #status.ok { background:var(--ok); color:#06140d; }
+  #status.warn { background:var(--warn); color:#1d1404; }
+  #status.bad { background:var(--bad); color:#fff; }
+  main { padding:12px 16px; display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); }
+  figure { margin:0; background:#000; border-radius:8px; overflow:hidden; position:relative; }
+  video { width:100%; display:block; aspect-ratio:4/3; background:#000; }
+  figcaption { position:absolute; left:8px; bottom:8px; font-size:12px; background:rgba(0,0,0,.6); padding:2px 8px; border-radius:4px; }
+  #empty { color:var(--muted); padding:24px 16px; }
+  button { background:#2a3238; color:var(--text); border:0; border-radius:6px; padding:6px 12px; font-size:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Watchtower live view</h1>
+  <span class="pill" id="tower">Tower: …</span>
+  <span class="pill" id="event"></span>
+  <span class="pill warn" id="status">Connecting…</span>
+  <button id="unmute" hidden>Tap to play</button>
+</header>
+<div id="empty">Waiting for the tower to start streaming…</div>
+<main id="videos"></main>
+
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const room = params.get("room");
+  const token = params.get("token");
+  const statusEl = document.getElementById("status");
+  const videosEl = document.getElementById("videos");
+  const emptyEl = document.getElementById("empty");
+  let pc = null, ws = null, iceServers = [], retryMs = 1000;
+
+  function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = "pill " + cls; }
+
+  if (!room || !token) { setStatus("Link is missing room or token", "bad"); return; }
+
+  async function loadIce() {
+    const r = await fetch(`/ice-config?room=${encodeURIComponent(room)}&token=${encodeURIComponent(token)}`);
+    if (!r.ok) throw new Error(r.status === 404 ? "This alert link has expired" : "Not allowed");
+    const cfg = await r.json();
+    iceServers = cfg.iceServers;
+    document.getElementById("tower").textContent = "Tower: " + cfg.tower_id;
+    document.getElementById("event").textContent = [cfg.event, cfg.track_id].filter(Boolean).join(" · ");
+  }
+
+  function clearVideos() { videosEl.innerHTML = ""; emptyEl.hidden = false; }
+
+  function addVideo(stream, label) {
+    emptyEl.hidden = true;
+    const fig = document.createElement("figure");
+    const v = document.createElement("video");
+    v.autoplay = true; v.muted = true; v.playsInline = true; v.srcObject = stream;
+    v.play().catch(() => { document.getElementById("unmute").hidden = false; });
+    const cap = document.createElement("figcaption"); cap.textContent = label;
+    fig.append(v, cap); videosEl.append(fig);
+  }
+
+  // Wait until the browser has collected its network addresses (no trickle ICE needed).
+  function waitForIce(peer, ms = 4000) {
+    if (peer.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise(res => {
+      const t = setTimeout(res, ms);
+      peer.addEventListener("icegatheringstatechange", () => {
+        if (peer.iceGatheringState === "complete") { clearTimeout(t); res(); }
+      });
+    });
+  }
+
+  async function handleOffer(sdp) {
+    if (pc) pc.close();
+    clearVideos();
+    pc = new RTCPeerConnection({ iceServers });
+    let camNo = 0;
+    pc.ontrack = (e) => addVideo(new MediaStream([e.track]), "Camera " + (++camNo));
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      if (s === "connected") setStatus("Live", "ok");
+      else if (s === "failed") setStatus("Video blocked by network (check TURN)", "bad");
+      else if (s === "disconnected") setStatus("Signal weak…", "warn");
+    };
+    await pc.setRemoteDescription({ type: "offer", sdp });
+    await pc.setLocalDescription(await pc.createAnswer());
+    await waitForIce(pc);
+    ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription.sdp }));
+    setStatus("Connecting video…", "warn");
+  }
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(room)}?role=viewer&token=${encodeURIComponent(token)}`);
+    ws.onopen = () => { retryMs = 1000; };
+    ws.onmessage = async (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "welcome") setStatus(msg.publisher_online ? "Tower online, starting video…" : "Waiting for tower…", "warn");
+      else if (msg.type === "publisher-joined") setStatus("Tower online, starting video…", "warn");
+      else if (msg.type === "offer") await handleOffer(msg.sdp);
+      else if (msg.type === "publisher-left") { if (pc) pc.close(); pc = null; clearVideos(); setStatus("Tower went offline, waiting…", "warn"); }
+    };
+    ws.onclose = (ev) => {
+      if (ev.code === 4403 || ev.code === 4410) { setStatus("This alert link has expired", "bad"); return; }
+      if (ev.code === 4429) { setStatus("Too many viewers on this alert", "bad"); return; }
+      setStatus("Reconnecting…", "warn");
+      setTimeout(connect, retryMs); retryMs = Math.min(retryMs * 2, 15000);
+    };
+  }
+
+  document.getElementById("unmute").onclick = (e) => {
+    document.querySelectorAll("video").forEach(v => v.play()); e.target.hidden = true;
+  };
+
+  loadIce().then(connect).catch(err => setStatus(err.message, "bad"));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# systemd unit for the tower's cell-brain service on the Raspberry Pi.
+# Replace "python -m your_cell_brain" with your detection program, which
+# imports pi_cell.escalate and calls escalate(...) when it decides to.
+#
+# Install:
+#   sudo cp deploy/watchtower-cell.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now watchtower-cell
+#   journalctl -u watchtower-cell -f        # watch the logs
+
+[Unit]
+Description=Watchtower cell brain
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/watchtower-webrtc
+ExecStart=/home/pi/watchtower-webrtc/.venv/bin/python -m your_cell_brain
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

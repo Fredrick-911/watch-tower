@@ -1,0 +1,15 @@
+# Sensitive secrets and keys
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+
+# Local IDE/Editor configs (Optional but recommended)
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
